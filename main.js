@@ -1,6 +1,6 @@
 /*
 ╔════════════════════════════════════════════════════════════╗
-║      TIKTOK AUTO REPLY - FINAL VERSION                     ║
+║      TIKTOK AUTO REPLY + COMMENT SCRAPER V2                ║
 ╚════════════════════════════════════════════════════════════╝
 */
 
@@ -11,11 +11,18 @@
     DISCORD_LINK: 'https://discord.gg/4JdW2n695T',
     MAX_REPLIES: 10,
     DELAY_MIN: 3000,
-    DELAY_MAX: 5000
+    DELAY_MAX: 5000,
+    AUTO_SCROLL_DELAY: 2000,
+    MAX_SCROLL_ATTEMPTS: 30
   };
 
-  const STORAGE_KEY = 'tiktok_replied_v16';
+  const STORAGE_KEY = 'tiktok_replied_v17';
   let replied = new Set(JSON.parse(localStorage.getItem(STORAGE_KEY) || '[]'));
+  
+  const scrapedComments = [];
+  let isInterceptActive = false;
+  const originalFetch = window.fetch;
+  const originalXHR = window.XMLHttpRequest;
 
   const createUI = () => {
     const ui = document.createElement('div');
@@ -26,7 +33,7 @@
           position: fixed;
           top: 20px;
           right: 20px;
-          width: 500px;
+          width: 520px;
           background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
           border-radius: 16px;
           box-shadow: 0 20px 60px rgba(0,0,0,0.3);
@@ -64,39 +71,39 @@
         }
         .tr-stats {
           display: grid;
-          grid-template-columns: 1fr 1fr 1fr;
-          gap: 10px;
+          grid-template-columns: 1fr 1fr 1fr 1fr;
+          gap: 8px;
           margin-bottom: 15px;
         }
         .tr-stat {
           background: #f8f9fa;
-          padding: 10px;
+          padding: 8px;
           border-radius: 8px;
           text-align: center;
         }
         .tr-stat-value {
-          font-size: 20px;
+          font-size: 18px;
           font-weight: bold;
           color: #667eea;
         }
         .tr-stat-label {
-          font-size: 11px;
+          font-size: 10px;
           color: #666;
           margin-top: 2px;
         }
         .tr-control {
           display: flex;
-          gap: 10px;
+          gap: 8px;
           margin-bottom: 15px;
         }
         .tr-btn {
           flex: 1;
-          padding: 12px;
+          padding: 10px;
           border: none;
           border-radius: 8px;
           font-weight: 600;
           cursor: pointer;
-          font-size: 14px;
+          font-size: 13px;
           transition: all 0.2s;
         }
         .tr-btn-primary {
@@ -114,6 +121,17 @@
           background: #f0f0f0;
           color: #333;
         }
+        .tr-btn-success {
+          background: #10b981;
+          color: white;
+        }
+        .tr-btn-success:hover {
+          background: #059669;
+        }
+        .tr-btn-warning {
+          background: #f59e0b;
+          color: white;
+        }
         .tr-status {
           text-align: center;
           padding: 10px;
@@ -128,18 +146,19 @@
           background: #f8f9fa;
           border-radius: 8px;
           padding: 12px;
-          max-height: 300px;
+          max-height: 250px;
           overflow-y: auto;
           font-size: 11px;
           font-family: 'Courier New', monospace;
         }
         .tr-log-item {
-          padding: 5px 8px;
-          margin-bottom: 3px;
+          padding: 4px 8px;
+          margin-bottom: 2px;
           background: white;
           border-radius: 4px;
           border-left: 3px solid #667eea;
           word-wrap: break-word;
+          color: #000;
         }
         .tr-log-success { border-left-color: #10b981; }
         .tr-log-error { border-left-color: #ef4444; }
@@ -150,13 +169,32 @@
           font-size: 9px;
           margin-right: 6px;
         }
+        .tr-intercept-badge {
+          display: inline-block;
+          padding: 2px 8px;
+          background: #10b981;
+          color: white;
+          border-radius: 12px;
+          font-size: 10px;
+          margin-left: 8px;
+        }
+        .tr-intercept-badge.inactive {
+          background: #ef4444;
+        }
       </style>
       <div class="tr-header">
-        <div class="tr-title">🤖 TikTok Auto Reply</div>
+        <div class="tr-title">
+          🤖 TikTok Auto Reply
+          <span class="tr-intercept-badge" id="tr-intercept-badge">🔴 OFF</span>
+        </div>
         <button class="tr-close">×</button>
       </div>
       <div class="tr-body">
         <div class="tr-stats">
+          <div class="tr-stat">
+            <div class="tr-stat-value" id="tr-scraped">0</div>
+            <div class="tr-stat-label">Scraped</div>
+          </div>
           <div class="tr-stat">
             <div class="tr-stat-value" id="tr-found">0</div>
             <div class="tr-stat-label">Ditemukan</div>
@@ -172,8 +210,9 @@
         </div>
         <div class="tr-status" id="tr-status">Siap digunakan</div>
         <div class="tr-control">
-          <button class="tr-btn tr-btn-primary" id="tr-start">▶ Mulai Auto Reply</button>
-          <button class="tr-btn tr-btn-secondary" id="tr-clear">🗑 Reset</button>
+          <button class="tr-btn tr-btn-success" id="tr-scrape">📥 Scrape DOM</button>
+          <button class="tr-btn tr-btn-primary" id="tr-start">▶ Reply</button>
+          <button class="tr-btn tr-btn-secondary" id="tr-clear">🗑</button>
         </div>
         <div class="tr-log" id="tr-log"></div>
       </div>
@@ -184,13 +223,16 @@
 
   const ui = createUI();
   const elStatus = document.getElementById('tr-status');
+  const elScraped = document.getElementById('tr-scraped');
   const elFound = document.getElementById('tr-found');
   const elSuccess = document.getElementById('tr-success');
   const elSkip = document.getElementById('tr-skip');
   const elLog = document.getElementById('tr-log');
+  const btnScrape = document.getElementById('tr-scrape');
   const btnStart = document.getElementById('tr-start');
   const btnClear = document.getElementById('tr-clear');
   const btnClose = ui.querySelector('.tr-close');
+  const badgeIntercept = document.getElementById('tr-intercept-badge');
 
   let isDragging = false, offsetX, offsetY;
   const header = ui.querySelector('.tr-header');
@@ -208,11 +250,17 @@
   };
   document.onmouseup = () => isDragging = false;
 
-  btnClose.onclick = () => ui.remove();
+  btnClose.onclick = () => {
+    stopIntercept();
+    ui.remove();
+  };
+  
   btnClear.onclick = () => {
     replied.clear();
+    scrapedComments.length = 0;
     localStorage.removeItem(STORAGE_KEY);
     elLog.innerHTML = '';
+    elScraped.textContent = '0';
     elFound.textContent = '0';
     elSuccess.textContent = '0';
     elSkip.textContent = '0';
@@ -243,172 +291,279 @@
     return Math.abs(h).toString(36);
   };
 
-  const scrapeComments = () => {
-    addLog('🔍 Mulai scraping komentar...', 'info');
+  // Intercept Fetch
+  const startIntercept = () => {
+    if (isInterceptActive) return;
     
-    const comments = [];
+    // Intercept Fetch
+    window.fetch = function(...args) {
+      return originalFetch.apply(this, args).then(response => {
+        const url = typeof args[0] === 'string' ? args[0] : args[0].url;
+        
+        if (url && (url.includes('comment') || url.includes('Comment'))) {
+          addLog(`🔍 API detected: ${url.substring(0, 60)}...`, 'info');
+          
+          response.clone().json().then(data => {
+            addLog(`📦 Response data: ${JSON.stringify(data).substring(0, 100)}...`, 'info');
+            
+            // Coba berbagai struktur response
+            let comments = data.comments || data.data?.comments || data.itemList || [];
+            
+            if (comments && comments.length > 0) {
+              comments.forEach(c => {
+                try {
+                  const user = c.user || c.author || {};
+                  const commentData = {
+                    id: hash((user.unique_id || user.uniqueId || user.id || '') + ':' + (c.text || c.content || '').substring(0, 50)),
+                    username: user.unique_id || user.uniqueId || user.nickname || user.id || 'unknown',
+                    nama: user.nickname || user.name || user.unique_id || '',
+                    komentar: c.text || c.content || '',
+                    likes: c.digg_count || c.likeCount || c.likes || 0,
+                    waktu: new Date((c.create_time || c.createTime || Date.now() / 1000) * 1000).toLocaleString()
+                  };
+                  
+                  if (!scrapedComments.find(sc => sc.id === commentData.id)) {
+                    scrapedComments.push(commentData);
+                    elScraped.textContent = scrapedComments.length;
+                    addLog(`✅ +1 comment: @${commentData.username}`, 'success');
+                  }
+                } catch (e) {
+                  addLog(`⚠️ Parse error: ${e.message}`, 'warning');
+                }
+              });
+            }
+          }).catch(err => {
+            addLog(`⚠️ Response parse error: ${err.message}`, 'warning');
+          });
+        }
+        
+        return response;
+      });
+    };
     
-    // Cari semua span dengan data-e2e="comment-reply-1" (tombol Reply)
-    const replyButtons = document.querySelectorAll('span[data-e2e="comment-reply-1"]');
-    
-    addLog(`🔘 Ditemukan ${replyButtons.length} tombol Reply`, replyButtons.length > 0 ? 'success' : 'error');
-    
-    let processedCount = 0;
-    
-    for (const replyBtn of replyButtons) {
-      // Skip jika di dalam UI panel kita
-      if (replyBtn.closest('#tiktok-reply-ui')) {
-        continue;
-      }
+    // Intercept XHR
+    window.XMLHttpRequest = function() {
+      const xhr = new originalXHR();
+      const originalOpen = xhr.open;
+      const originalSend = xhr.send;
       
-      processedCount++;
-      addLog(`━━━━━━━━━━━━━━━━━━━━━━━━`, 'info');
-      addLog(`🔎 [${processedCount}] Processing reply button...`, 'info');
+      xhr.open = function(method, url) {
+        this._url = url;
+        return originalOpen.apply(this, arguments);
+      };
       
+      xhr.send = function() {
+        this.addEventListener('load', function() {
+          const url = this._url;
+          if (url && (url.includes('comment') || url.includes('Comment'))) {
+            try {
+              const data = JSON.parse(this.responseText);
+              addLog(`🔍 XHR detected: ${url.substring(0, 60)}...`, 'info');
+              
+              let comments = data.comments || data.data?.comments || data.itemList || [];
+              
+              if (comments && comments.length > 0) {
+                comments.forEach(c => {
+                  try {
+                    const user = c.user || c.author || {};
+                    const commentData = {
+                      id: hash((user.unique_id || user.uniqueId || user.id || '') + ':' + (c.text || c.content || '').substring(0, 50)),
+                      username: user.unique_id || user.uniqueId || user.nickname || user.id || 'unknown',
+                      nama: user.nickname || user.name || user.unique_id || '',
+                      komentar: c.text || c.content || '',
+                      likes: c.digg_count || c.likeCount || c.likes || 0,
+                      waktu: new Date((c.create_time || c.createTime || Date.now() / 1000) * 1000).toLocaleString()
+                    };
+                    
+                    if (!scrapedComments.find(sc => sc.id === commentData.id)) {
+                      scrapedComments.push(commentData);
+                      elScraped.textContent = scrapedComments.length;
+                      addLog(`✅ +1 comment: @${commentData.username}`, 'success');
+                    }
+                  } catch (e) {}
+                });
+              }
+            } catch (e) {}
+          }
+        });
+        return originalSend.apply(this, arguments);
+      };
+      
+      return xhr;
+    };
+    
+    isInterceptActive = true;
+    badgeIntercept.textContent = '🟢 ON';
+    badgeIntercept.classList.remove('inactive');
+    addLog('🟢 Intercept aktif (Fetch + XHR)', 'success');
+  };
+
+  const stopIntercept = () => {
+    window.fetch = originalFetch;
+    window.XMLHttpRequest = originalXHR;
+    isInterceptActive = false;
+    badgeIntercept.textContent = '🔴 OFF';
+    badgeIntercept.classList.add('inactive');
+  };
+
+  // Scrape dari DOM langsung
+  const scrapeDOMComments = async () => {
+    addLog('🔍 Scraping dari DOM...', 'info');
+    
+    await sleep(500);
+    
+    const commentElements = document.querySelectorAll('[data-e2e="comment-level-1"]');
+    addLog(`📋 Found ${commentElements.length} comment elements`, 'info');
+    
+    let newCount = 0;
+    
+    for (const commentEl of commentElements) {
       try {
-        // Naik ke parent untuk cari container komentar lengkap
-        let container = replyBtn;
-        let depth = 0;
-        let textEl = null;
-        let usernameEl = null;
+        const container = commentEl.closest('[class*="Comment"]') || commentEl.parentElement?.parentElement?.parentElement;
         
-        while (container && depth < 15) {
-          // Cari elemen text komentar
-          textEl = container.querySelector('span[data-e2e="comment-level-1"]');
-          
-          // Cari username dengan berbagai selector
-          usernameEl = container.querySelector('span[data-e2e="comment-username-1"]') ||
-                      container.querySelector('span[data-e2e*="username"]') ||
-                      container.querySelector('a[data-e2e*="username"]');
-          
-          addLog(`   Depth ${depth}: username=${!!usernameEl}, text=${!!textEl}`, 'info');
-          
-          if (usernameEl) {
-            addLog(`   🔍 Username selector: ${usernameEl.getAttribute('data-e2e')}`, 'info');
-          }
-          
-          if (textEl && usernameEl) {
-            const username = usernameEl.textContent.trim();
-            const text = textEl.textContent.trim();
-            
-            addLog(`   👤 Username: "${username}"`, 'success');
-            addLog(`   💬 Text: "${text.substring(0, 40)}..."`, 'success');
-            
-            if (!username || username.length === 0) {
-              addLog(`   ⚠️ Skip: username kosong`, 'warning');
-              break;
-            }
-            
-            if (!text || text.length < 3) {
-              addLog(`   ⚠️ Skip: text terlalu pendek (${text.length})`, 'warning');
-              break;
-            }
-            
-            const id = hash(username + ':' + text.substring(0, 50));
-            
-            // Cek duplikat
-            if (comments.find(c => c.id === id)) {
-              addLog(`   ⏭️  Skip: duplikat`, 'warning');
-              break;
-            }
-            
-            addLog(`   ✅ Valid comment added!`, 'success');
-            
-            comments.push({
-              id,
-              username,
-              text,
-              element: container,
-              replyBtn
-            });
-            
-            break;
-          }
-          
-          container = container.parentElement;
-          depth++;
-        }
+        const usernameEl = container?.querySelector('[data-e2e*="username"]') || 
+                          container?.querySelector('a[href*="@"]');
+        const textEl = commentEl;
+        const likesEl = container?.querySelector('[data-e2e*="like-count"]');
         
-        if (!textEl || !usernameEl) {
-          addLog(`   ❌ Tidak ditemukan setelah ${depth} level parent`, 'error');
+        if (usernameEl && textEl) {
+          const username = usernameEl.textContent.trim().replace('@', '');
+          const text = textEl.textContent.trim();
+          const likes = likesEl ? likesEl.textContent.trim() : '0';
           
-          // Debug: tampilkan semua elemen dengan data-e2e di sekitar reply button
-          const nearbyE2e = replyBtn.parentElement?.parentElement?.parentElement?.querySelectorAll('[data-e2e]');
-          if (nearbyE2e && nearbyE2e.length > 0) {
-            const uniqueE2e = [...new Set(Array.from(nearbyE2e).map(el => el.getAttribute('data-e2e')))];
-            addLog(`   📋 Nearby data-e2e: ${uniqueE2e.slice(0, 10).join(', ')}`, 'info');
+          if (username && text && text.length > 2) {
+            const commentData = {
+              id: hash(username + ':' + text.substring(0, 50)),
+              username: username,
+              nama: username,
+              komentar: text,
+              likes: likes,
+              waktu: new Date().toLocaleString()
+            };
+            
+            if (!scrapedComments.find(sc => sc.id === commentData.id)) {
+              scrapedComments.push(commentData);
+              newCount++;
+            }
           }
         }
-        
-        // Hanya debug 3 komentar pertama
-        if (processedCount >= 3 && comments.length === 0) {
-          addLog(`   ⚠️ Debug limit: stopping after 3 attempts`, 'warning');
-          break;
-        }
-        
       } catch (e) {
-        addLog(`   ❌ Error: ${e.message}`, 'error');
+        addLog(`⚠️ Parse error: ${e.message}`, 'warning');
       }
     }
     
-    addLog(`━━━━━━━━━━━━━━━━━━━━━━━━`, 'info');
-    addLog(`📊 Total ditemukan: ${comments.length} komentar`, comments.length > 0 ? 'success' : 'error');
+    elScraped.textContent = scrapedComments.length;
+    addLog(`✅ Scrape DOM: +${newCount} comments`, newCount > 0 ? 'success' : 'warning');
     
-    return comments;
+    return newCount;
+  };
+
+  // Auto scroll
+  const autoScrollComments = async () => {
+    addLog('📜 Mulai auto scroll...', 'info');
+    
+    const container = document.querySelector('[data-e2e="comment-list"]') || 
+                     document.querySelector('[class*="comment-list"]') ||
+                     document.querySelector('[class*="CommentList"]');
+    
+    if (!container) {
+      addLog('❌ Container komentar tidak ditemukan', 'error');
+      addLog('💡 Coba scroll manual ke bagian komentar', 'warning');
+      return;
+    }
+
+    let scrollAttempts = 0;
+    let lastCount = scrapedComments.length;
+    let noNewCommentsCount = 0;
+
+    while (scrollAttempts < CONFIG.MAX_SCROLL_ATTEMPTS) {
+      container.scrollTo(0, container.scrollHeight);
+      scrollAttempts++;
+      
+      elStatus.textContent = `📜 Scroll ${scrollAttempts}/${CONFIG.MAX_SCROLL_ATTEMPTS} | ${scrapedComments.length} komentar`;
+      
+      await sleep(CONFIG.AUTO_SCROLL_DELAY);
+      
+      // Scrape DOM setelah scroll
+      await scrapeDOMComments();
+      
+      const currentCount = scrapedComments.length;
+      
+      if (currentCount === lastCount) {
+        noNewCommentsCount++;
+        if (noNewCommentsCount >= 3) {
+          addLog('✅ Scroll selesai (tidak ada komentar baru)', 'success');
+          break;
+        }
+      } else {
+        noNewCommentsCount = 0;
+        addLog(`📊 Progress: ${currentCount} total comments`, 'info');
+      }
+      
+      lastCount = currentCount;
+    }
+    
+    addLog(`📊 Total ${scrapedComments.length} komentar berhasil di-scrape`, 'success');
+  };
+
+  // Scrape button handler
+  btnScrape.onclick = async () => {
+    btnScrape.disabled = true;
+    btnScrape.textContent = '⏳ Scraping...';
+    
+    scrapedComments.length = 0;
+    elScraped.textContent = '0';
+    
+    // Scrape DOM dulu
+    await scrapeDOMComments();
+    
+    // Lalu auto scroll
+    await autoScrollComments();
+    
+    btnScrape.disabled = false;
+    btnScrape.textContent = '📥 Scrape DOM';
+    elStatus.textContent = `✅ ${scrapedComments.length} komentar ready`;
+    
+    if (scrapedComments.length === 0) {
+      addLog('⚠️ Tidak ada komentar ditemukan', 'warning');
+      addLog('💡 Pastikan sudah scroll ke bagian komentar', 'warning');
+    }
   };
 
   const findReplyTextarea = () => {
-    addLog('   🔍 Mencari textarea dengan berbagai metode...', 'info');
-    
-    // Metode 1: Cari DraftEditor-editorContainer
     const draftEditors = document.querySelectorAll('.DraftEditor-editorContainer [contenteditable="true"]');
-    addLog(`   📋 DraftEditor found: ${draftEditors.length}`, 'info');
     
     for (const editor of Array.from(draftEditors).reverse()) {
       if (!editor.offsetParent) continue;
       
-      // Cari placeholder di parent
       const placeholder = editor.closest('.DraftEditor-root')?.querySelector('[id*="placeholder"]');
       const placeholderText = placeholder ? placeholder.textContent.toLowerCase() : '';
       
-      addLog(`   📝 Placeholder: "${placeholderText}"`, 'info');
-      
-      // Skip "Add comment"
       if (placeholderText.includes('add comment') || placeholderText.includes('add a comment')) {
-        addLog(`   ⏭️  Skip: Add comment textarea`, 'warning');
         continue;
       }
       
-      // Prioritas textarea dengan placeholder "reply"
       if (placeholderText.includes('reply') || placeholderText.includes('balas')) {
-        addLog(`   ✅ Found: Reply textarea via placeholder`, 'success');
         return editor;
       }
       
-      // Fallback: textarea visible pertama yang bukan "add comment"
-      addLog(`   ✅ Found: Reply textarea (fallback)`, 'success');
       return editor;
     }
     
-    // Metode 2: Fallback ke contenteditable biasa
     const textareas = Array.from(document.querySelectorAll('[contenteditable="true"]')).reverse();
-    addLog(`   📋 Contenteditable found: ${textareas.length}`, 'info');
     
     for (const ta of textareas) {
       if (!ta.offsetParent) continue;
       
       const ariaDesc = (ta.getAttribute('aria-describedby') || '').toLowerCase();
       
-      // Skip add comment
       if (ariaDesc.includes('add') && ariaDesc.includes('comment')) {
         continue;
       }
       
-      addLog(`   ✅ Found: Textarea via contenteditable`, 'success');
       return ta;
     }
     
-    addLog(`   ❌ Textarea tidak ditemukan`, 'error');
     return null;
   };
 
@@ -428,23 +583,16 @@
   };
 
   const findPostButton = () => {
-    addLog('   🔍 Mencari tombol Post/Enter...', 'info');
-    
-    // Prioritas 1: Cari div dengan data-e2e="comment-post"
     const postDiv = document.querySelector('div[data-e2e="comment-post"]');
     if (postDiv && postDiv.offsetParent) {
-      addLog('   ✅ Found: Post button (div)', 'success');
       return postDiv;
     }
     
-    // Prioritas 2: Cari button/div dengan aria-label="Post"
     const postByAria = document.querySelector('[aria-label="Post"][role="button"]');
     if (postByAria && postByAria.offsetParent) {
-      addLog('   ✅ Found: Post button (aria)', 'success');
       return postByAria;
     }
     
-    // Prioritas 3: Cari button biasa
     const buttons = Array.from(document.querySelectorAll('button, div[role="button"], span[role="button"]')).filter(b => b.offsetParent);
     
     for (const btn of buttons) {
@@ -455,67 +603,105 @@
       if (text.includes('post') || text.includes('kirim') || text.includes('send') ||
           ariaLabel.includes('post') || ariaLabel.includes('kirim') || ariaLabel.includes('send') ||
           dataE2e.includes('post')) {
-        addLog('   ✅ Found: Post button (search)', 'success');
         return btn;
       }
     }
     
-    addLog('   ⚠️ Post button tidak ditemukan, akan pakai Enter', 'warning');
     return null;
   };
 
-  const replyToComment = async (comment) => {
+  const replyToCommentByUsername = async (username, text) => {
     try {
-      addLog(`━━━━━━━━━━━━━━━━━━━━━━━━`, 'info');
-      addLog(`💬 @${comment.username}`, 'info');
-      addLog(`   "${comment.text.substring(0, 40)}..."`, 'info');
+      addLog(`💬 @${username}`, 'info');
 
-      addLog(`   📜 Scroll ke komentar`, 'info');
-      comment.element.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      await sleep(1500);
-
-      addLog(`   🖱️ Klik tombol Reply`, 'info');
-      comment.replyBtn.click();
-      await sleep(3000);
-
-      addLog(`   🔍 Mencari textarea reply`, 'info');
-      const textarea = findReplyTextarea();
-      if (!textarea) {
-        addLog(`   ❌ Textarea tidak ditemukan`, 'error');
+      // Cari container komentar
+      const container = findCommentContainer();
+      
+      if (!container) {
+        addLog(`   ⚠️ Container not found, trying visible buttons only`, 'warning');
+        
+        // Fallback: cari langsung di visible buttons
+        const allReplyBtns = Array.from(document.querySelectorAll('span[data-e2e="comment-reply-1"]'))
+          .filter(btn => !btn.closest('#tiktok-reply-ui'));
+        
+        for (const btn of allReplyBtns) {
+          // Naik 3 level ke parent (sesuai hasil debug)
+          let commentContainer = btn.parentElement?.parentElement?.parentElement;
+          
+          if (commentContainer) {
+            const foundUsername = extractUsername(commentContainer);
+            
+            if (foundUsername === username) {
+              addLog(`   ✅ Found in visible area!`, 'success');
+              return await executeReply(btn, commentContainer);
+            }
+          }
+        }
+        
+        addLog(`   ❌ Not found in visible area`, 'error');
         return false;
       }
-
-      addLog(`   ⌨️ Mengetik pesan`, 'info');
-      await typeText(textarea, `ayo join serverku! ${CONFIG.DISCORD_LINK}`);
+      
+      // Scroll ke atas dulu
+      container.scrollTop = 0;
       await sleep(800);
-
-      // Coba tekan Enter dulu (metode utama TikTok)
-      addLog(`   ⌨️ Tekan Enter untuk kirim`, 'info');
-      textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-      textarea.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
-      textarea.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
       
-      await sleep(1000);
+      let found = false;
+      let scrollAttempts = 0;
+      const maxScrollAttempts = 40;
+      const maxScroll = container.scrollHeight - container.clientHeight;
       
-      // Cek apakah berhasil (textarea dikosongkan)
-      if (textarea.textContent.trim().length === 0 || textarea.innerHTML.trim().length < 10) {
-        addLog(`   ✅ Berhasil kirim via Enter!`, 'success');
-        return true;
-      }
-      
-      // Fallback: coba klik tombol Post
-      addLog(`   🔍 Enter gagal, coba tombol Post...`, 'warning');
-      const postBtn = findPostButton();
-      if (postBtn) {
-        addLog(`   📤 Klik tombol Post`, 'info');
-        postBtn.click();
-        await sleep(2000);
+      while (!found && scrollAttempts < maxScrollAttempts) {
+        const currentScroll = container.scrollTop;
         
-        addLog(`   ✅ Berhasil kirim via Post button!`, 'success');
-        return true;
+        // Cari semua reply button yang visible
+        const allReplyBtns = Array.from(document.querySelectorAll('span[data-e2e="comment-reply-1"]'))
+          .filter(btn => {
+            if (btn.closest('#tiktok-reply-ui')) return false;
+            const rect = btn.getBoundingClientRect();
+            return rect.top >= 0 && rect.top <= window.innerHeight;
+          });
+        
+        if (scrollAttempts % 5 === 0) {
+          addLog(`   🔎 Scroll ${scrollAttempts}: ${allReplyBtns.length} visible (${currentScroll}/${maxScroll})`, 'info');
+        }
+        
+        for (const btn of allReplyBtns) {
+          // Naik 3 level ke parent sesuai hasil debug
+          // Level 0: SPAN (reply button)
+          // Level 1: DIV
+          // Level 2: DIV
+          // Level 3: DIV.DivCommentContentWrapper (ada username & text di sini)
+          let commentContainer = btn.parentElement?.parentElement?.parentElement;
+          
+          if (!commentContainer) continue;
+          
+          const foundUsername = extractUsername(commentContainer);
+          
+          if (foundUsername === username) {
+            found = true;
+            addLog(`   ✅ MATCH! Found @${username}`, 'success');
+            return await executeReply(btn, commentContainer);
+          }
+        }
+        
+        // Cek apakah sudah mentok bawah
+        if (currentScroll >= maxScroll - 10) {
+          addLog(`   ⚠️ Reached bottom`, 'warning');
+          break;
+        }
+        
+        // Scroll ke bawah 350px
+        container.scrollTop += 350;
+        await sleep(1000);
+        
+        scrollAttempts++;
       }
-
-      addLog(`   ❌ Gagal kirim pesan`, 'error');
+      
+      if (!found) {
+        addLog(`   ❌ Not found after ${scrollAttempts} scrolls`, 'error');
+      }
+      
       return false;
 
     } catch (error) {
@@ -524,38 +710,159 @@
     }
   };
 
-  btnStart.onclick = async () => {
-    btnStart.disabled = true;
-    btnStart.textContent = '⏳ Berjalan...';
+  // Helper function untuk extract username
+  const extractUsername = (container) => {
+    // Coba selector yang ditemukan di debug
+    const usernameEl = container.querySelector('[data-e2e*="username"]') ||
+                      container.querySelector('a[href*="/@"]');
     
-    addLog('━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-    addLog('🚀 MULAI AUTO REPLY', 'success');
-    addLog('━━━━━━━━━━━━━━━━━━━━━━━━', 'info');
-
-    elStatus.textContent = '🔍 Scraping komentar...';
-    await sleep(500);
-
-    const allComments = scrapeComments();
+    if (usernameEl) {
+      return usernameEl.textContent.trim().replace('@', '');
+    }
     
-    if (allComments.length === 0) {
-      addLog('❌ Tidak ada komentar ditemukan', 'error');
-      addLog('💡 Scroll ke bagian komentar terlebih dahulu', 'warning');
-      elStatus.textContent = '❌ Tidak ada komentar';
-      btnStart.disabled = false;
-      btnStart.textContent = '▶ Mulai Auto Reply';
+    return null;
+  };
+
+  const executeReply = async (btn, commentContainer) => {
+    try {
+      // Scroll ke komentar
+      commentContainer.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      await sleep(2000);
+
+      // Klik reply
+      addLog(`   🖱️ Clicking reply`, 'info');
+      btn.click();
+      await sleep(3500);
+
+      const textarea = findReplyTextarea();
+      if (!textarea) {
+        addLog(`   ❌ Textarea not found`, 'error');
+        return false;
+      }
+
+      addLog(`   ⌨️ Typing message`, 'info');
+      await typeText(textarea, `ayo join serverku! ${CONFIG.DISCORD_LINK}`);
+      await sleep(1000);
+
+      addLog(`   📤 Sending (Enter)`, 'info');
+      textarea.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+      textarea.dispatchEvent(new KeyboardEvent('keypress', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+      textarea.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+      
+      await sleep(1500);
+      
+      if (textarea.textContent.trim().length === 0 || textarea.innerHTML.trim().length < 10) {
+        addLog(`   ✅ Success via Enter!`, 'success');
+        return true;
+      }
+      
+      addLog(`   🔄 Trying Post button`, 'warning');
+      const postBtn = findPostButton();
+      if (postBtn) {
+        postBtn.click();
+        await sleep(2000);
+        addLog(`   ✅ Success via Post!`, 'success');
+        return true;
+      }
+
+      addLog(`   ❌ Failed to send`, 'error');
+      return false;
+    } catch (error) {
+      addLog(`   ❌ Execute reply error: ${error.message}`, 'error');
+      return false;
+    }
+  };
+
+  const findCommentContainer = () => {
+    // Coba berbagai selector
+    const selectors = [
+      '[data-e2e="comment-list"]',
+      'div[class*="DivCommentListContainer"]',
+      'div[class*="CommentListContainer"]',
+      'div[class*="comment-list"]',
+      'div[class*="CommentList"]'
+    ];
+    
+    for (const selector of selectors) {
+      const el = document.querySelector(selector);
+      if (el && el.scrollHeight > el.clientHeight) {
+        addLog(`   📦 Container found: ${selector}`, 'success');
+        return el;
+      }
+    }
+    
+    return null;
+  };
+
+  const scrollToLoadAllComments = async () => {
+    addLog('📜 Scroll untuk load semua komentar...', 'info');
+    
+    const container = findCommentContainer();
+    
+    if (!container) {
+      addLog('⚠️ Container tidak ditemukan, skip scroll', 'warning');
       return;
     }
 
-    const comments = allComments.filter(c => !replied.has(c.id)).slice(0, CONFIG.MAX_REPLIES);
+    // Scroll ke paling atas dulu
+    container.scrollTop = 0;
+    await sleep(500);
+
+    let scrollAttempts = 0;
+    const maxAttempts = 25;
+    let lastScrollTop = -1;
+
+    while (scrollAttempts < maxAttempts) {
+      const currentScrollTop = container.scrollTop;
+      const maxScroll = container.scrollHeight - container.clientHeight;
+      
+      // Cek apakah sudah mentok atau tidak ada perubahan
+      if (currentScrollTop >= maxScroll - 10 || currentScrollTop === lastScrollTop) {
+        addLog('✅ Scroll selesai (mentok bawah)', 'success');
+        break;
+      }
+      
+      lastScrollTop = currentScrollTop;
+      
+      // Scroll 400px
+      container.scrollTop += 400;
+      scrollAttempts++;
+      
+      elStatus.textContent = `📜 Scrolling ${scrollAttempts}/${maxAttempts}... (${currentScrollTop}/${maxScroll})`;
+      
+      await sleep(1200);
+    }
+    
+    // Scroll ke atas lagi
+    addLog('⬆️ Scroll kembali ke atas', 'info');
+    container.scrollTop = 0;
+    await sleep(1500);
+  };
+
+  btnStart.onclick = async () => {
+    if (scrapedComments.length === 0) {
+      addLog('⚠️ Scrape dulu untuk dapatkan komentar', 'warning');
+      return;
+    }
+
+    btnStart.disabled = true;
+    btnStart.textContent = '⏳ Loading...';
+    
+    addLog('🚀 MULAI AUTO REPLY', 'success');
+
+    // Scroll dulu untuk load semua komentar ke DOM
+    await scrollToLoadAllComments();
+
+    const comments = scrapedComments.filter(c => !replied.has(c.id)).slice(0, CONFIG.MAX_REPLIES);
     
     elFound.textContent = comments.length;
-    addLog(`✅ Ditemukan ${comments.length} komentar baru`, 'success');
+    addLog(`✅ ${comments.length} komentar akan di-reply`, 'success');
 
     if (comments.length === 0) {
-      addLog('⚠️ Semua komentar sudah di-reply', 'warning');
+      addLog('⚠️ Semua sudah di-reply', 'warning');
       elStatus.textContent = '✅ Semua sudah di-reply';
       btnStart.disabled = false;
-      btnStart.textContent = '▶ Mulai Auto Reply';
+      btnStart.textContent = '▶ Reply';
       return;
     }
 
@@ -567,7 +874,7 @@
       
       elStatus.textContent = `📝 Reply ${i+1}/${comments.length}...`;
 
-      const success = await replyToComment(comment);
+      const success = await replyToCommentByUsername(comment.username, comment.komentar);
       
       if (success) {
         successCount++;
@@ -581,21 +888,21 @@
 
       if (i < comments.length - 1) {
         const delay = Math.floor(Math.random() * (CONFIG.DELAY_MAX - CONFIG.DELAY_MIN)) + CONFIG.DELAY_MIN;
-        addLog(`⏳ Tunggu ${Math.round(delay / 1000)} detik...`, 'info');
+        addLog(`⏳ Tunggu ${Math.round(delay / 1000)}s...`, 'info');
         elStatus.textContent = `⏳ Tunggu ${Math.round(delay / 1000)}s...`;
         await sleep(delay);
       }
     }
 
-    addLog('━━━━━━━━━━━━━━━━━━━━━━━━', 'success');
-    addLog(`🏁 SELESAI! ${successCount} berhasil, ${skipCount} dilewati`, 'success');
-    addLog('━━━━━━━━━━━━━━━━━━━━━━━━', 'success');
+    addLog(`🏁 SELESAI! ${successCount} berhasil, ${skipCount} skip`, 'success');
     
     elStatus.textContent = '✅ Selesai!';
     btnStart.disabled = false;
-    btnStart.textContent = '▶ Mulai Auto Reply';
+    btnStart.textContent = '▶ Reply';
   };
 
-  addLog('🚀 Script loaded!', 'success');
-  addLog('💡 Klik "Mulai Auto Reply" untuk memulai', 'info');
+  // Auto start interceptor
+  startIntercept();
+  addLog('🚀 Script ready!', 'success');
+  addLog('💡 Klik "Scrape DOM" untuk ambil komentar', 'info');
 })();
